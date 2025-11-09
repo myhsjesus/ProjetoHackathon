@@ -31,8 +31,6 @@
         </div>
     </div>
     <script>
-
-        const { ipcRenderer } = require('electron');
         // *** IMPORTANTE: ENVOLVA TODO O SEU CÓDIGO DENTRO DE DOMContentLoaded ***
         // Isso garante que o JS só tente buscar os elementos HTML APÓS eles existirem.
         document.addEventListener('DOMContentLoaded', () => {
@@ -49,16 +47,18 @@
             const controlPanel = document.getElementById('control-panel');
             const captionContainer = document.querySelector('.caption-container');
             
-            // Variáveis de controle de áudio
-            let mediaRecorder;
+            // Variáveis de controle de áudio (WebSocket streaming)
             let audioStream;
-            let audioChunks = [];
             let isListening = false;
             let isPaused = false;
+            let ws = null;
+            let audioCtx = null;
+            let processor = null;
 
-            // --- Configurações de Transcrição (Para Python) ---
-            const CHUNK_INTERVAL = 1500;
-            const PYTHON_API_URL = 'http://127.0.0.1:5001/transcribe';
+            // --- Configurações de Transcrição ---
+            // WebSocket Vosk local (baixa latência)
+            const VOSK_WS = 'ws://127.0.0.1:2700';
+            const VOSK_SAMPLE_RATE = 16000; // sample rate esperado pelo Vosk
             // ----------------------------------------------------
             
             // --- FUNÇÕES DE CONTROLE DE INTERATIVIDADE (ELECTRON) ---
@@ -73,182 +73,197 @@
                 controlPanel.classList.add('hidden');
             }
 
+            // Throttled mousemove watcher: decide whether the window should ignore mouse
+            // events (pass them through to underlying windows) depending on the element
+            // under the cursor. If the element is effectively transparent to pointer
+            // events, we tell the main process to forward events; otherwise keep the
+            // window interactive.
+            let lastIgnoreState = null;
+            function parseAlphaFromBg(bg) {
+                if (!bg) return 0;
+                // bg formats: 'rgba(r, g, b, a)' or 'rgb(r, g, b)' or 'transparent'
+                if (bg === 'transparent') return 0;
+                const m = bg.match(/rgba?\(([^)]+)\)/);
+                if (!m) return 1;
+                const parts = m[1].split(',').map(s => s.trim());
+                if (parts.length === 4) return parseFloat(parts[3]) || 0;
+                return 1;
+            }
 
-            // --- LÓGICA DE ÁUDIO E COMUNICAÇÃO COM PYTHON ---
-            // ... (Seu código de sendAudioChunk) ...
-            // Convert a recorded Blob (any browser audio container) into WAV Blob
-            async function blobToWav(blob) {
-                const arrayBuffer = await blob.arrayBuffer();
-                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            function shouldWindowIgnoreAtPoint(x, y) {
+                const el = document.elementFromPoint(x, y);
+                if (!el) return true; // nothing -> treat as transparent
+
+                // If element explicitly opts out of pointer events, pass through.
+                const pe = getComputedStyle(el).pointerEvents;
+                if (pe === 'none') return true;
+
+                // Walk up ancestors to check background alpha. If any ancestor provides
+                // a non-zero background alpha, we consider the pixel opaque for our
+                // purposes and keep the window interactive there.
+                let node = el;
+                while (node && node !== document.documentElement) {
+                    const bg = getComputedStyle(node).backgroundColor;
+                    const alpha = parseAlphaFromBg(bg);
+                    if (alpha > 0) return false; // opaque-ish
+                    node = node.parentElement;
+                }
+                // No ancestor provides an opaque background -> pass through.
+                return true;
+            }
+
+            // simple throttle
+            let mouseThrottleTimer = null;
+            window.addEventListener('mousemove', (ev) => {
+                if (mouseThrottleTimer) return;
+                mouseThrottleTimer = setTimeout(() => {
+                    mouseThrottleTimer = null;
+                    try {
+                        const wantIgnore = shouldWindowIgnoreAtPoint(ev.clientX, ev.clientY);
+                        if (wantIgnore !== lastIgnoreState) {
+                            ipcRenderer.send('set-ignore-mouse-events', wantIgnore, { forward: true });
+                            lastIgnoreState = wantIgnore;
+                        }
+                    } catch (e) {
+                        console.warn('ignore mouse detection failed', e);
+                    }
+                }, 50); // 20Hz
+            }, { passive: true });
+
+
+            // --- LÓGICA DE ÁUDIO: WebAudio -> PCM16 16k -> WebSocket (Vosk) ---
+            function floatTo16BitPCM(float32Array) {
+                const l = float32Array.length;
+                const buffer = new ArrayBuffer(l * 2);
+                const view = new DataView(buffer);
+                let offset = 0;
+                for (let i = 0; i < l; i++, offset += 2) {
+                    let s = Math.max(-1, Math.min(1, float32Array[i]));
+                    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+                }
+                return buffer;
+            }
+
+            function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+                if (outputSampleRate === inputSampleRate) {
+                    return buffer;
+                }
+                const sampleRateRatio = inputSampleRate / outputSampleRate;
+                const newLength = Math.round(buffer.length / sampleRateRatio);
+                const result = new Float32Array(newLength);
+                let offsetResult = 0;
+                let offsetBuffer = 0;
+                while (offsetResult < result.length) {
+                    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                    let accum = 0, count = 0;
+                    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                        accum += buffer[i];
+                        count++;
+                    }
+                    result[offsetResult] = accum / count;
+                    offsetResult++;
+                    offsetBuffer = nextOffsetBuffer;
+                }
+                return result;
+            }
+
+            async function startStreamingToVosk() {
                 try {
-                    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                    ws = new WebSocket(VOSK_WS);
+                    ws.binaryType = 'arraybuffer';
 
-                    function interleave(inputL, inputR) {
-                        const length = inputL.length + inputR.length;
-                        const result = new Float32Array(length);
-                        let index = 0;
-                        let inputIndex = 0;
-                        while (index < length) {
-                            result[index++] = inputL[inputIndex];
-                            result[index++] = inputR[inputIndex];
-                            inputIndex++;
+                    ws.onopen = () => {
+                        console.log('WS connected to Vosk');
+                        captionOutput.textContent = 'WS conectado ao Vosk';
+                    };
+
+                    ws.onerror = (evt) => {
+                        console.error('WS error', evt);
+                        captionOutput.textContent = 'Erro: conexão WS com Vosk';
+                    };
+
+                    ws.onclose = (evt) => {
+                        console.warn('WS closed', evt);
+                        captionOutput.textContent = 'Conexão WS fechada';
+                    };
+
+                    ws.onmessage = (evt) => {
+                        try {
+                            const data = JSON.parse(evt.data);
+                            if (data.type === 'partial') {
+                                captionOutput.textContent = data.partial;
+                            } else if (data.type === 'final') {
+                                captionOutput.textContent = data.text;
+                            } else if (data.type === 'reset') {
+                                captionOutput.textContent = '';
+                            }
+                        } catch (e) {
+                            console.error('WS parse error', e);
                         }
-                        return result;
-                    }
+                    };
 
-                    function writeString(view, offset, string) {
-                        for (let i = 0; i < string.length; i++) {
-                            view.setUint8(offset + i, string.charCodeAt(i));
+                    captionOutput.textContent = 'Solicitando acesso ao microfone...';
+                    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    captionOutput.textContent = 'Microfone permitido. Iniciando...';
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    const inputSampleRate = audioCtx.sampleRate;
+                    const source = audioCtx.createMediaStreamSource(audioStream);
+
+                    processor = audioCtx.createScriptProcessor(2048, 1, 1);
+                    source.connect(processor);
+                    processor.connect(audioCtx.destination);
+
+                    processor.onaudioprocess = (e) => {
+                        try {
+                            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                            const inputData = e.inputBuffer.getChannelData(0);
+                            const downsampled = downsampleBuffer(inputData, inputSampleRate, VOSK_SAMPLE_RATE);
+                            const pcm16 = floatTo16BitPCM(downsampled);
+                            ws.send(pcm16);
+                        } catch (err) {
+                            console.error('Erro no processamento de áudio:', err);
                         }
-                    }
-
-                    const numChannels = audioBuffer.numberOfChannels;
-                    const sampleRate = audioBuffer.sampleRate;
-                    let samples;
-
-                    if (numChannels === 2) {
-                        samples = interleave(audioBuffer.getChannelData(0), audioBuffer.getChannelData(1));
-                    } else {
-                        samples = audioBuffer.getChannelData(0);
-                    }
-
-                    const bytesPerSample = 2;
-                    const blockAlign = numChannels * bytesPerSample;
-                    const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
-                    const view = new DataView(buffer);
-
-                    /* RIFF identifier */
-                    writeString(view, 0, 'RIFF');
-                    /* file length */
-                    view.setUint32(4, 36 + samples.length * bytesPerSample, true);
-                    /* RIFF type */
-                    writeString(view, 8, 'WAVE');
-                    /* format chunk identifier */
-                    writeString(view, 12, 'fmt ');
-                    /* format chunk length */
-                    view.setUint32(16, 16, true);
-                    /* sample format (raw) */
-                    view.setUint16(20, 1, true);
-                    /* channel count */
-                    view.setUint16(22, numChannels, true);
-                    /* sample rate */
-                    view.setUint32(24, sampleRate, true);
-                    /* byte rate (sampleRate * blockAlign) */
-                    view.setUint32(28, sampleRate * blockAlign, true);
-                    /* block align (channel count * bytes per sample) */
-                    view.setUint16(32, blockAlign, true);
-                    /* bits per sample */
-                    view.setUint16(34, 8 * bytesPerSample, true);
-                    /* data chunk identifier */
-                    writeString(view, 36, 'data');
-                    /* data chunk length */
-                    view.setUint32(40, samples.length * bytesPerSample, true);
-
-                    // Write PCM samples
-                    let offset = 44;
-                    for (let i = 0; i < samples.length; i++, offset += 2) {
-                        let s = Math.max(-1, Math.min(1, samples[i]));
-                        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-                    }
-
-                    return new Blob([view], { type: 'audio/wav' });
+                    };
                 } catch (err) {
-                    console.warn('Decoding audio failed, sending raw chunk as fallback:', err);
-                    // As fallback, try to return original blob and hope the backend can decode it
-                    return blob;
+                    console.error('Erro ao iniciar streaming Vosk:', err);
+                    captionOutput.textContent = 'Erro: não foi possível iniciar streaming.';
                 }
             }
 
-            async function sendAudioChunk(chunk) {
-                if (!chunk || chunk.size === 0) return;
-
+            function stopStreamingToVosk() {
                 try {
-                    // Convert to WAV for best compatibility with Python speech_recognition
-                    const wavBlob = await blobToWav(chunk);
-
-                    const response = await fetch(PYTHON_API_URL, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'audio/wav'
-                        },
-                        body: wavBlob
-                    });
-
-                    const data = await response.json();
-
-                    if (data.success && data.transcription) {
-                        // Append new transcription to existing caption, with a space
-                        let newText = data.transcription.trim();
-                        if (newText.length === 0) return;
-                        // Limit total length to avoid overflow
-                        const existing = captionOutput.textContent === '🔊 Ouvindo...' || captionOutput.textContent.startsWith('Pressione') ? '' : captionOutput.textContent;
-                        const combined = (existing + ' ' + newText).trim();
-                        captionOutput.textContent = combined.length > 500 ? combined.slice(-500) : combined;
-                    } else {
-                        if (data.transcription && data.transcription !== "[Silêncio ou áudio ininteligível]") {
-                            const newText = data.transcription.trim();
-                            const existing = captionOutput.textContent === '🔊 Ouvindo...' || captionOutput.textContent.startsWith('Pressione') ? '' : captionOutput.textContent;
-                            const combined = (existing + ' ' + newText).trim();
-                            captionOutput.textContent = combined.length > 500 ? combined.slice(-500) : combined;
-                        }
+                    if (processor) {
+                        processor.disconnect();
+                        processor = null;
                     }
-                } catch (error) {
-                    console.error('Erro na comunicação com o backend Python:', error);
-                    captionOutput.textContent = 'Erro de Rede/Python. Verifique o servidor (porta 5001).';
-                    stopRecording();
+                    if (audioCtx) {
+                        audioCtx.close();
+                        audioCtx = null;
+                    }
+                    if (audioStream) {
+                        audioStream.getTracks().forEach(t => t.stop());
+                        audioStream = null;
+                    }
+                    if (ws) {
+                        try { ws.close(); } catch(e) {}
+                        ws = null;
+                    }
+                } catch (e) {
+                    console.warn('Erro ao parar streaming:', e);
                 }
             }
             
             // ... (Seu código de startRecording, stopProcessing, stopRecording) ...
             function startRecording() {
                 captionOutput.textContent = 'Iniciando microfone...';
-                
-                navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        sampleRate: 44100,
-                        sampleSize: 16,
-                        echoCancellation: true,
-                        noiseSuppression: true
-                    }
-                })
-                .then(stream => {
-                    audioStream = stream;
-                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm; codecs=pcm' });
-                    
-                    mediaRecorder.ondataavailable = event => {
-                        if (event.data.size > 0) {
-                            audioChunks.push(event.data);
-                        }
-                    };
-                    
-                    mediaRecorder.onstop = stopProcessing;
-
-                    mediaRecorder.start(CHUNK_INTERVAL);
-                    
-                    isListening = true;
-                    isPaused = false;
-                    captionOutput.textContent = '🔊 Ouvindo...';
-                    // Reset caption to start fresh for this session
-                    captionOutput.textContent = '🔊 Ouvindo...';
-                    pauseResumeButton.disabled = false;
-                    stopButton.disabled = false;
-                    startButton.disabled = true;
-                    pauseResumeButton.innerHTML = '<i class="fas fa-pause"></i> PAUSAR';
-
-                    const sendLoop = setInterval(() => {
-                        if (isListening && !isPaused && audioChunks.length > 0) {
-                            const audioBlob = new Blob(audioChunks, { type: 'application/octet-stream' });
-                            sendAudioChunk(audioBlob);
-                            audioChunks = [];
-                        }
-                        if (!isListening && sendLoop) clearInterval(sendLoop); 
-                    }, CHUNK_INTERVAL);
-                })
-                .catch(error => {
-                    console.error('Erro ao acessar o microfone:', error);
-                    captionOutput.textContent = 'Erro: Microfone bloqueado ou inacessível.';
-                    stopRecording();
-                });
+                startStreamingToVosk();
+                isListening = true;
+                isPaused = false;
+                captionOutput.textContent = '🔊 Ouvindo...';
+                pauseResumeButton.disabled = false;
+                stopButton.disabled = false;
+                startButton.disabled = true;
+                pauseResumeButton.innerHTML = '<i class="fas fa-pause"></i> PAUSAR';
             }
             
             function stopProcessing() {
@@ -256,19 +271,14 @@
                 startButton.disabled = false;
                 pauseResumeButton.disabled = true;
                 stopButton.disabled = true;
-                
-                if(audioStream) {
-                    audioStream.getTracks().forEach(track => track.stop());
-                }
+                stopStreamingToVosk();
                 captionOutput.textContent = captionOutput.textContent + ' [Reconhecimento encerrado.]';
             }
 
             function stopRecording() {
-                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                    mediaRecorder.stop();
-                } else {
-                    stopProcessing();
-                }
+                // Não usamos MediaRecorder neste fluxo de streaming para Vosk.
+                // Apenas encerra o processamento e oculta os controles.
+                stopProcessing();
                 disableInteraction();
             }
             
@@ -283,12 +293,14 @@
             pauseResumeButton.addEventListener('click', () => {
                 if (isListening) {
                     if (isPaused) {
-                        mediaRecorder.resume(); 
+                        // resume: re-start processing
+                        startStreamingToVosk();
                         isPaused = false;
                         pauseResumeButton.innerHTML = '<i class="fas fa-pause"></i> PAUSAR';
                         captionOutput.textContent = '🔊 Retomando a escuta...';
                     } else {
-                        mediaRecorder.pause(); 
+                        // pause: stop processing but keep UI
+                        stopStreamingToVosk();
                         isPaused = true;
                         pauseResumeButton.innerHTML = '<i class="fas fa-play"></i> VOLTAR';
                         captionOutput.textContent = '⏸️ Pausado.';
