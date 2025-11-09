@@ -69,9 +69,9 @@ def transcribe_audio():
     # *** 2. FIM DO BLOCO TRY PRINCIPAL E INÍCIO DOS EXCEPT GERAIS ***
 
     # Este é o primeiro except que o código Python encontra fora do TRY
-    except sr.UnknownValueError:
+  
         # Se ocorrer na Tentativa 2, retorna sucesso, mas sem texto (silêncio)
-        return jsonify({"success": False, "transcription": ""}), 200 
+    
 
     except Exception as e:
         # Captura erros de rede (sr.RequestError) ou erros relançados do bloco interno (e_raw)
