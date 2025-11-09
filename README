@@ -6,3 +6,9 @@ pip install Flask SpeechRecognition requests
 depois rode o server do back-end com python app_backend.py
 
 
+para o front:
+navegue para a psta FrontEnd no cmd e rode:
+npm install
+
+depois rode o front-end com:
+npm start
