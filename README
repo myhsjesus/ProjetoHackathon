@@ -1,3 +1,8 @@
+requisitos para rodar o projeto:
+Instalar python 3.9 ou superior
+Instalar node.js 16 ou superior
+
+
 Navegue até a pasta do backend no cmd e rode os seguintes comandos:
 
 pip install flask-cors
