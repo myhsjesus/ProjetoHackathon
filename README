@@ -1,0 +1,8 @@
+Navegue até a pasta do backend no cmd e rode os seguintes comandos:
+
+pip install flask-cors
+pip install Flask SpeechRecognition requests
+
+depois rode o server do back-end com python app_backend.py
+
+
