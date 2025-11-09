@@ -15,10 +15,40 @@ Pré-requisitos
 ```bat
 cd "c:\Users\Ana Karoline\OneDrive\Área de Trabalho\pastas\Fatec Sem 3\ProjetoHackathon\BackEnd"
 ```
-- Criar e ativar o virtualenv:
+-- Criar o virtualenv:
 ```bat
 python -m venv venv
+```
+
+-- Como ativar o `venv` (dependendo do shell):
+
+- Prompt de Comando (cmd):
+```bat
 venv\Scripts\activate
+```
+
+- PowerShell (recomendo abrir PowerShell como usuário normal):
+```powershell
+.\venv\Scripts\Activate.ps1
+```
+Se o PowerShell bloquear a execução por política, rode (apenas se souber o que faz):
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+- Git Bash / WSL / bash (Windows/Unix):
+```bash
+source venv/Scripts/activate   # no Git Bash do Windows
+# ou em sistemas Unix-like (Linux/macOS):
+source venv/bin/activate
+```
+
+-- Como saber se o `venv` está ativo
+- O prompt do terminal normalmente mostrará o prefixo `(venv)` antes do prompt quando o ambiente estiver ativo. Enquanto ativo, comandos `python` e `pip` usarão o ambiente.
+
+-- Como desativar o `venv`:
+```bat
+deactivate
 ```
 - Atualizar pip e instalar dependências do projeto:
 ```bat
