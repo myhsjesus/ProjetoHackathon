@@ -27,6 +27,8 @@
         </div>
     </div>
     <script>
+
+        const { ipcRenderer } = require('electron');
         // *** IMPORTANTE: ENVOLVA TODO O SEU CÓDIGO DENTRO DE DOMContentLoaded ***
         // Isso garante que o JS só tente buscar os elementos HTML APÓS eles existirem.
         document.addEventListener('DOMContentLoaded', () => {
