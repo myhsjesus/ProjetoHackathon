@@ -23,38 +23,40 @@ def transcribe_audio():
     # *** 1. INÍCIO DO BLOCO TRY PRINCIPAL ***
     try:
         
-        # --- TENTATIVA 1: WebM com arquivo temporário (Requer FFmpeg/Pydub) ---
+        # --- TENTATIVA 1: Receber WAV/WEBM/etc e salvar como arquivo temporário WAV ---
         try:
-            with tempfile.NamedTemporaryFile(suffix=".webm", delete=True) as temp_audio_file:
-                temp_audio_file.write(audio_data)
-                temp_audio_file.seek(0)
-                
-                with sr.AudioFile(temp_audio_file) as source:
-                    audio_segment = r.record(source) 
+            # Preferir gravar como .wav para compatibilidade com speech_recognition
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as temp_wav:
+                temp_wav.write(audio_data)
+                temp_wav.flush()
+                temp_wav.seek(0)
 
-                transcription = r.recognize_google(audio_segment, language="pt-BR")
-                
-        # --- SE A TENTATIVA WEB M FALHAR (CAUSA MAIS PROVÁVEL) ---
-        except Exception as e_webm:
-            print(f"DEBUG: Tentativa 1 (WebM) falhou. Erro: {e_webm}")
-            
+                try:
+                    with sr.AudioFile(temp_wav.name) as source:
+                        audio_segment = r.record(source)
+                    transcription = r.recognize_google(audio_segment, language="pt-BR")
+                except sr.UnknownValueError:
+                    transcription = ""
+                except Exception as e_file:
+                    # If reading as wav fails, try raw PCM fallback below
+                    print(f"DEBUG: leitura como WAV falhou: {e_file}")
+                    raise e_file
+
+        except Exception as e_first:
             # --- TENTATIVA 2: Forçar tratamento como dados brutos (PCM/RAW) ---
+            print(f"DEBUG: Tentativa 1 (WAV) falhou. Erro: {e_first}")
             try:
                 audio_segment = sr.AudioData(audio_data, sample_rate=44100, sample_width=2)
                 transcription = r.recognize_google(audio_segment, language="pt-BR")
-            
             except sr.UnknownValueError:
-                # Silêncio ou áudio ininteligível na tentativa RAW
                 transcription = ""
             except Exception as e_raw:
-                # ERRO CRÍTICO NA LEITURA RAW/PCM
                 print("-" * 50)
                 print("🚨 ERRO CRÍTICO INTERNO NO PROCESSAMENTO DO ÁUDIO (RAW/PCM) 🚨")
-                print(f"Tentativa 1 (WebM) falhou com: {e_webm}")
+                print(f"Tentativa 1 (WAV) falhou com: {e_first}")
                 print(f"Tentativa 2 (RAW/PCM) falhou com: {e_raw}")
                 print("-" * 50)
-                # Re-lança o erro para o except final (Rede/Geral)
-                raise e_raw 
+                raise e_raw
 
         # Se a transcrição chegou até aqui (seja pela Tentativa 1 ou 2)
         time.sleep(0.1) 
