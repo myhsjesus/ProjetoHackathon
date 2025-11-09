@@ -1,26 +1,92 @@
-requisitos para rodar o projeto:
-Instalar python 3.9 ou superior
-- Baixe em https://www.python.org/ e execute o instalador (no Windows marque "Add Python to PATH").
-- Verifique: 
-  python --version
-  pip --version
+Requisitos e passos para rodar o projeto (Windows / PowerShell)
 
-- Para o back:
-- Navegue para a pasta BackEnd no cmd
-- Instale dependências do backend:
-  pip install flask-cors Flask SpeechRecognition requests
-  (ou crie um requirements.txt e rode: pip install -r requirements.txt)
-- Rode o server do back-end:
-  python app_backend.py
+Este README descreve como preparar e rodar a solução com reconhecimento em tempo real usando Vosk (WebSocket). As instruções assumem Windows, PowerShell e Python já instalados.
 
-Instalar node.js 16 ou superior
-- Baixe em https://nodejs.org/ e execute o instalador (o instalador normalmente adiciona node e npm ao PATH).
-- Verifique:
-  node --version
-  npm --version
-  
-- Para o front:
-  navegue para a pasta FrontEnd no cmd e rode:
-  npm install
-  depois rode o front-end com:
-  npm start
+1) Instalar Python (se necessário)
+- Baixe e instale Python 3.9+ em https://www.python.org/ (marque "Add Python to PATH" no instalador).
+- Verifique no PowerShell:
+```powershell
+python --version
+pip --version
+```
+
+2) Instalar dependências do BackEnd
+- Abra PowerShell na pasta `BackEnd` do projeto:
+```powershell
+cd C:\Users\Aluno\Documents\ProjetoHackathon\BackEnd
+```
+- Instale dependências básicas:
+```powershell
+python -m pip install --user flask flask-cors SpeechRecognition requests
+```
+
+3) (Recomendado) Instalar ffmpeg (opcional, necessário só para debug/conversão)
+- ffmpeg facilita converter WebM/Opus para WAV ao testar. Instale via Chocolatey ou manualmente:
+```powershell
+choco install ffmpeg -y
+# ou baixe de https://ffmpeg.org/
+```
+Verifique:
+```powershell
+ffmpeg -version
+```
+
+4) Instalar Vosk e dependências para o servidor WebSocket (recomendado para baixa latência)
+- No mesmo PowerShell (pasta BackEnd):
+```powershell
+python -m pip install --user vosk websockets
+```
+- Baixe um modelo Vosk em português (sugestão: vosk-model-small-pt) do site oficial:
+  - https://alphacephei.com/vosk/models
+  - Extraia o conteúdo em `BackEnd/models/pt` (crie a pasta se necessário).
+
+5) Iniciar o servidor Vosk WebSocket
+- Rode no PowerShell (pasta BackEnd):
+```powershell
+python ws_vosk_server.py
+```
+- Saída esperada:
+  - "Loading Vosk model from: models/pt"
+  - "Vosk WS server running on ws://127.0.0.1:2700"
+
+6) Preparar o FrontEnd (Electron)
+- No PowerShell abra a pasta `FrontEnd`:
+```powershell
+cd ..\FrontEnd
+```
+- Instale dependências do frontend (se ainda não instalou):
+```powershell
+npm install
+```
+- Inicie o Electron (o script `start` no package.json já está configurado):
+```powershell
+npm start
+```
+
+7) Teste rápido (funcionamento esperado)
+- Com o servidor Vosk rodando e o Electron iniciado:
+  - Clique em INICIAR na UI.
+  - Fale algo em pt-BR no microfone.
+  - A legenda (caption) deve mostrar hipóteses parciais em tempo real e depois o resultado final.
+
+8) Testes e debug adicionais
+- Testar a rota HTTP antiga com um WAV (útil para checar se o backend SpeechRecognition funciona):
+```powershell
+# a partir da pasta BackEnd
+curl.exe -X POST --data-binary "@Teste.wav" http://127.0.0.1:5001/transcribe -H "Content-Type: application/octet-stream"
+# ou powerhsell native
+$bytes = [System.IO.File]::ReadAllBytes("Teste.wav")
+Invoke-RestMethod -Uri "http://127.0.0.1:5001/transcribe" -Method Post -Body $bytes -ContentType "application/octet-stream"
+```
+
+9) Notas e recomendações
+- O modelo Vosk pode ser grande; use a versão "small" para testes locais.
+- Para produção ou maior precisão, considere modelos maiores ou serviços de ASR.
+- Se preferir não usar Vosk, há um fallback (HTTP + ffmpeg) que converte blocos WebM para WAV e usa `speech_recognition`, porém com maior latência.
+
+10) Problemas comuns
+- "ffmpeg not found": instale ffmpeg e garanta que está no PATH.
+- "Model path not found": verifique se o modelo Vosk foi extraído em `BackEnd/models/pt`.
+- Se a legenda não aparece: abra DevTools no Electron (menu ou descomente a linha openDevTools em main.js) e veja erros no console.
+
+Se quiser, eu adiciono um `README.md` mais formatado com passos para Linux/macOS também, ou crio um script de instalação.
